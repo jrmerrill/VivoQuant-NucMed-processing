@@ -1,0 +1,453 @@
+//
+//Whole-body SPECT or PET/CT Pre-Processing VivoScript
+//
+//Joseph R. Merrill
+//Molecular Imaging Core / Scott Lyons Lab
+//Cold Spring Harbor Laboratory
+//Last update 2025/10/09
+//
+
+// global variables
+var mw = VQ.mainWin();
+var c = VQ.controler();
+var dm = VQ.dataManager();
+var sv	= VQ.sliceViewer();
+var mm = VQ.minMaxTool();
+var vtk = VQ.vtkController();
+var vw = VQ.vtkViewer();
+
+//determine VQ version for version-dependent functions
+
+var version = VQ.applicationName();
+version =  version.split(" ");
+version = version[1];
+version = version.split("");
+version = version[0];
+
+//set directory for the study. Create if necessary
+
+var parentFolder = "C:/Users/JOSEPH/Dropbox (CSHL Dropbox Team)/Study-Folders/";
+var studyid;
+var refdate;
+
+if(VQ.askYesNoQuestion('Does this dataset belong to an existing study?')){
+	var studyfolder = VQ.getLocalPath('Select study directory', startdir = parentFolder);
+	studyid = studyfolder.substr(studyfolder.lastIndexOf('/')+1);		//get studyid from name of selected directory
+	if(VQ.fileExists(studyfolder+"/study_refdate.txt")){					//read existing study_refdate
+		refdate = VQ.readFile(studyfolder+"/study_refdate.txt");			//file for refdate to apply to this subject
+	}
+}else{
+	studyid = VQ.getText("study ID","Enter a name for the study")		//if this is a new study, ask for a reference date
+	VQ.mkdir(parentFolder,studyid);
+	if(VQ.askYesNoQuestion('Is this a longitudinal study with a single reference date,\ne.g. date of tumor implantation in all subjects?')){
+		refdate = VQ.getText("Ref Date","Enter reference date (e.g. date of tumor implantation) in the format yyyymmdd:");
+		VQ.writeFile(parentFolder+"/"+studyid+"/"+"study_refdate.txt",refdate);
+	}
+}
+
+var params;
+var huwinmin;
+var huwinmax;
+var convunit;		//NM image conversion unit (e.g. '%ID/g' 'SUV' 'uCi' etc.)
+var suvwinmin;
+var suvwinmax;
+var lut;			//Lookup table for final NM renders 
+
+if(VQ.fileExists(studyfolder+"/parameters.txt")){						//look for parameters.txt file to pre-load final image settings
+	params = VQ.readFile(studyfolder+"/parameters.txt");
+	params = String(params);
+	params = params.split(",");
+	huwinmin = params[0];
+	huwinmin = huwinmin.substr(huwinmin.lastIndexOf(':')+1);
+	huwinmax = params[1];
+	huwinmax = huwinmax.substr(huwinmax.lastIndexOf(':')+1);
+	convunit = params[2];
+	convunit = convunit.substr(convunit.lastIndexOf(':')+1)
+	suvwinmin = params[3];
+	suvwinmin = suvwinmin.substr(suvwinmin.lastIndexOf(':')+1);
+	suvwinmax = params[4];
+	suvwinmax = suvwinmax.substr(suvwinmax.lastIndexOf(':')+1);
+	lut = params[5];
+	lut = lut.substr(lut.lastIndexOf(':')+1);
+}else{			//defaults
+//	convunit = 'SUV';		//e.g. '%ID/g' 'SUV' 'uCi' etc.
+	lut = 'hot';			//e.g. 'hot' 'nih_fire2' 'hotblue'
+	suvwinmin = 0;			//Image windows for viewing
+	suvwinmax = 20;
+	huwinmin = -500;
+	huwinmax = 3000;
+}
+
+//
+//LOAD CT
+//
+
+mw.openDICOM();
+VQ.suspend('Select and open CT');
+
+var date = dm.getDesc(0,"seriesdate");
+var subjid = dm.getDesc(0,"patientid");
+if(!subjid){
+	subjid = VQ.getText("Subject ID", "Input subject ID");
+}
+if(VQ.folderExists(parentFolder+"/"+studyid+"/"+subjid+"/"+date)){
+	if(VQ.askYesNoQuestion("Didn't you do this one already?")){
+		VQ.abort();
+	};
+}
+
+//
+//REMOVE BED
+//
+
+mw.setupLayoutSlice();
+mw.switchCornerInfo(1);
+
+var machine = dm.getDcmString(0, "ManufacturersModelName");		//Determine which scanner was used
+machine = String(machine);										//to remove the appropriate cradle
+machine = machine.split(" ");
+machine = machine[1];
+var bed;
+if(machine == "SdC"){
+	bed = 1;					//SPECT cradle
+}else if(machine == "PC"){
+		bed = 0;				//PET cradle
+}else{
+		bed = 1;				//???
+		VQ.showMessage("Can't read machine name");
+}
+
+//advanced bed removal
+VQ.triggerAction("Advanced Modules|Bed removal|Advanced");
+mw.getBedRemovalWidget("advanceGroup").setChecked(true);
+mw.getBedRemovalWidget("textSelection").setText(0);
+mw.getBedRemovalWidget("bedMaskCb").setCurrentIndex(bed);	
+mw.getBedRemovalWidget("ManualPb").click();			
+mw.getBedRemovalWidget("backGroundClr").setValue(-1000);		
+mw.getBedRemovalWidget("DilateSb").setValue(2);
+mw.getBedRemovalWidget("underRegionCb").setChecked(1);
+mw.getBedRemovalWidget("PreviewPb").click();
+mw.getBedRemovalWidget("FATranslateXSb").setValue(-2);
+mw.getBedRemovalWidget("FATranslateYSb").setValue(-6);
+mw.getBedRemovalWidget("FATranslateZSb").setValue(10.5);
+mw.getBedRemovalWidget("FARotationXSb").setValue(-0.5);
+
+VQ.suspend('Manually register mask, then click CONFIRM');
+
+//fill in small gaps in mask
+mw.setViewMode("Slice View","3D ROI Tool");
+var op3D = VQ.currentOp();
+VQ.getWidget("qt_tabwidget_tabbar").setCurrentIndex(3);
+VQ.getWidget("MagicSegmentationSelector").setCurrentIndex(6);
+//VQ.getWidget("cb_MagickInput").setCurrentIndex(0);	//VQ3
+//VQ.getWidget("QLineEdit").setCurrentIndex(1);			//VQ4
+op3D.setInputROI(0);									//VQ2021
+VQ.getWidget("MagicMaxSize").setValue(100000);
+VQ.getWidget("MagicApply").click();
+
+//manually clean up mask
+VQ.getWidget("qt_tabwidget_tabbar").setCurrentIndex(1);
+VQ.getWidget("rbPaint2DOnly").setChecked(1);
+VQ.getWidget("bullyRadius").setValue(16);
+VQ.getWidget("cbROIs").setCurrentIndex(0);
+VQ.suspend('Check that mask does not cover subject');
+VQ.getWidget("qt_tabwidget_tabbar").setCurrentIndex(3);
+VQ.getWidget("MagicSegmentationSelector").setCurrentIndex(5);
+VQ.getWidget("cbROIs").setCurrentIndex(1);
+c.setPos(0,107);
+c.setPos(1,5);
+c.setPos(2,191);
+mw.switchCrosshair(1);
+//VQ.suspend('Click above cradle lid, in background ROI');
+VQ.getWidget("MagicApply").click();
+VQ.getWidget("cbROIs").setCurrentIndex(1);
+op3D.cutROI(0,1);
+op3D.editROI(1,'Mask0','red',0,1);
+
+//
+//REMOVE RESP PILLOW
+//
+
+op3D.addROI('pillow','green');
+VQ.getWidget("qt_tabwidget_tabbar").setCurrentIndex(3);
+VQ.getWidget("MagicSegmentationSelector").setCurrentIndex(1);
+
+
+if(version == 3 || version == 4){
+	VQ.getWidget("cb_MagickInput").setCurrentIndex(0);
+}else{
+	op3D.setInputROI(0);								//VQ2021
+}
+
+if(version == 3){
+	VQ.getWidget("MagicImage").setCurrentIndex(0);			//VQ3
+}else{
+	VQ.getWidget("dataSelector").setSelectionString('0');		//VQ4
+}
+
+const pillowmin = -100;
+const pillowmax = 100000;
+
+VQ.getWidget("MagicThresholdMin").setText(pillowmin);
+VQ.getWidget("MagicThresholdMax").setText(pillowmax);
+//mw.switchCrosshair(1);
+c.setPos(0,110);
+c.setPos(1,153);
+c.setPos(2,315);
+VQ.suspend('Click on respiratory pillow');
+VQ.getWidget("MagicApply").click();
+VQ.getWidget("qt_tabwidget_tabbar").setCurrentIndex(1);
+VQ.getWidget("cbMagicEDRadius").setCurrentIndex(3);		//+2 dilate
+op3D.applyErode();
+VQ.suspend('Check ROI');				//moved to line 158
+op3D.cutROI(0,1);
+op3D.clearAllROIs();
+c.setShowROIs(0);
+
+//
+//APPEND SPECT
+//
+
+mw.openDICOM();
+VQ.suspend('Select and APPEND SPECT');
+if(version == 3){
+	c.setPal(1,'nih_fire2');				//VQ3
+}else{
+	dm.setPalette(VQ.index(1),'nih_fire2');	//VQ4
+}
+
+//New multi-CT capabilities in progress
+var n = dm.size();
+n = n-1;
+if(n > 1){
+	dm.swapData(VQ.index(n),VQ.index(1));
+	sv.toggleShowInput2(0);
+}
+
+
+//
+//COREGISTRATION
+//
+/*
+mw.setViewMode("Slice View", "Reorientation/Registration");
+mw.setupLayoutSlice();
+VQ.centerCursor();
+dm.setMinMaxCache(0,-400,5000);		//Set CT to a darkened -400-5000HU window
+c.setRange(1,0.001,0.1);			//Set SPECT to 0.1-10% window
+
+VQ.suspend('Co-register SPECT w/ CT');				//Wait for user to manually coregister SPECT/CT
+
+mw.setViewMode("Slice View", "Reorientation/Registration");
+VQ.getWidget("buttonOK").click();
+*/
+//
+//Unit CONVERSION
+//
+
+var mass;					//body mass & inj dose for SUV calculation
+var dose;
+
+if(!params){
+	convunit = VQ.getItem('convunit',"Select NM image conversion unit",['SUV','%ID/g','uCi'],0);
+}
+
+//for SUV conversion, check DICOM hdr for body mass, and ask user if it's not there
+if(convunit == 'SUV'){
+	if(!dm.getDesc(1,"patientsweight")){
+		mass = VQ.getText("mass","Input subject body mass in grams");
+	}else{
+		mass = dm.getDesc(1,"patientsweight")*1000;		//Body mass stored in kg; unit lost later so change to g
+	}
+}
+
+dose = VQ.getText("Dose","Input net injected activity at scantime in MBq");
+
+var protocol = 'bedRemoval=false|coRegister=false|autoCrop=false|calibFactor=false|storeData=false|resample=false|convertUnit=true|convertUnitUnit='+convunit+'|injDose='+dose+' MBq|weight='+mass;
+VQ.preProcess(protocol);
+
+mw.setViewMode("Slice View", "Navigation");
+mw.setupLayoutSlice();
+if(version == 3){
+	c.setRange(0,0,1);					//Set CT to 0-100% window VQ3
+	c.setRange(1,0,1);					//Set SPECT to 0-100% window VQ3
+}else{
+	dm.setPaletteFromTo(VQ.index(0),0,1);	//Set CT to 0-100% window VQ4
+	dm.setPaletteFromTo(VQ.index(1),0,1);	//Set SPECT to 0-100% window VQ4
+}
+
+var nmmax = dm.getMax(1);			//Get and display SUV max for QC purposes
+if(nmmax>suvwinmax||nmmax<1){
+	VQ.showMessage('Max '+convunit+' is '+nmmax.toFixed(2)+'!');
+}
+
+dm.setMinMaxCache(0,huwinmin,huwinmax);		//Set CT to desired window
+dm.setMinMaxCache(1,suvwinmin,suvwinmax);	//Set SPECT to desired window
+
+//
+//CROPPING
+//
+
+mw.setViewMode("Slice View", "Cropping");
+mw.setupLayoutSlice();
+VQ.centerCursor();
+var opCrop = VQ.currentOp();
+var embd = 0;
+
+const FOVx = 180;			//Set desired final crop size in xyz
+const FOVy = 180;
+const FOVz = 420;
+	
+	
+	//Make sure FOV is large enough, expand if necessary
+	if(VQ.getWidget("sbEmbedX").value<(FOVx+(FOVx*0.2))){
+		VQ.getWidget("sbEmbedX").setValue((FOVx+(FOVx*0.2)));
+		embd = 1;
+	}
+	if(VQ.getWidget("sbEmbedY").value<(FOVy+(FOVy*0.2))){
+		VQ.getWidget("sbEmbedY").setValue((FOVy+(FOVy*0.2)));
+		embd = 1;
+	}
+	if(VQ.getWidget("sbEmbedZ").value<FOVz){
+		VQ.getWidget("sbEmbedZ").setValue(FOVz);
+		embd = 1;
+	}	
+	if(embd){
+		VQ.getWidget("buttonEmbed").click();
+	}
+		
+	if(version == 3){
+		VQ.getWidget("cbAutoCrop").setCurrentIndex(2);		//Initial autocrop to CT and SPECT VQ3
+	}else{
+		VQ.getWidget("dataSelector").setSelectionString('0,1');	//Initial autocrop to CT and SPECT VQ4
+	}
+    VQ.getWidget("buttonAutoCrop").click();
+    
+    var tempX1 = VQ.getWidget("sbFromX").value;			//Read autocrop values
+    var tempY1 = VQ.getWidget("sbFromY").value;
+    var tempZ1 = VQ.getWidget("sbFromZ").value;
+    var tempX2 = VQ.getWidget("sbToX").value;
+    var tempY2 = VQ.getWidget("sbToY").value;
+    var tempZ2 = VQ.getWidget("sbToZ").value;
+    
+    VQ.getWidget("sbFromX").setValue(tempX1-((FOVx-(tempX2-tempX1+1))/2));	//calculate and apply xyz range
+    VQ.getWidget("sbFromY").setValue(tempY1-((FOVy-(tempY2-tempY1+1))/2));
+    VQ.getWidget("sbFromZ").setValue(tempZ1-((FOVz-(tempZ2-tempZ1+1))/2));
+    VQ.getWidget("sbToX").setValue(tempX2+((FOVx-(tempX2-tempX1+1))/2));
+    VQ.getWidget("sbToY").setValue(tempY2+((FOVy-(tempY2-tempY1+1))/2));
+    VQ.getWidget("sbToZ").setValue(tempZ2+((FOVz-(tempZ2-tempZ1+1))/2));
+    
+//	VQ.suspend('Confirm crop');			//Wait for user to confrim crop
+	opCrop.executeCropping();			//Automatically crop w/out user verification
+
+//Setup desired layout and ensure MIP is correctly rendered
+mw.setViewMode("Slice View", "Navigation");
+mw.setupLayout1x4();
+mw.switchShowActive(0);
+mw.switchCrosshair(0);
+
+vw.setEnableGradient(false);
+vtk.setMIPEnabled(true);
+vtk.setMPREnabled(false);
+vtk.setAnnotationEnabled(true);
+vtk.disableAxes(true);
+vtk.setOrientEnabled(true);
+if(version == 3){
+	c.setPal(1,lut);					//VQ3
+}else{
+	dm.setPalette(VQ.index(1),lut);		//VQ4
+}
+
+if(!params){							//If no parameters.txt file ask user to verify W/L and LUT. Save these values in study folder
+	mw.showMinMaxTool();
+	VQ.suspend('Set desired W/L and LUT');
+	huwinmin = dm.getMinCached(0);				//Removed var declaration. Check
+	huwinmax = dm.getMaxCached(0);
+	suvwinmin = dm.getMinCached(1);
+	suvwinmax = dm.getMaxCached(1);
+	lut = dm.getPaletteName(VQ.index(1));
+	
+	VQ.writeFile(parentFolder+studyid+"/"+"parameters.txt","HUwinmin:"+huwinmin+"\n"+"HUwinmax:"+huwinmax+"\n"+
+		"convunit:"+convunit+"\n"+"SUVwinmin:"+suvwinmin+"\n"+"SUVwinmax:"+suvwinmax+"\n"+"LUT:"+lut);
+}
+
+//Ensure MIP scale updates correctly:
+if(version == 3){
+	c.setRange(0,0,0.1);					//Set CT to 0-10% window VQ3
+	c.setRange(1,0,0.1);					//Set SPECT to 0-10% window VQ3
+	mm.updateMIP();							//VQ3
+	c.setRange(0,0,1);						//Set CT to 0-100% window VQ3
+	c.setRange(1,0,1);						//Set SPECT to 0-100% window VQ3
+	mm.updateMIP();							//VQ3
+}else{
+	dm.setPaletteFromTo(VQ.index(0),0,0.1);	//Set CT to 0-10% window VQ4
+	dm.setPaletteFromTo(VQ.index(1),0,0.1);	//Set SPECT to 0-10% window VQ4
+	vw.renderUpdate();						//VQ4
+	dm.setPaletteFromTo(VQ.index(0),0,1);	//Set CT to 0-100% window VQ4
+	dm.setPaletteFromTo(VQ.index(1),0,1);	//Set SPECT to 0-100% window VQ4
+	vw.renderUpdate();						//VQ4
+}
+
+vtk.resetCamera();
+VQ.centerCursor();
+
+//
+//SAVE
+//
+//MIPs are saved in a directory structure readable by the long_study_ppt.m MATLAB script found
+//in this repository: github.com/jrmerrill/VivoQuant-NucMed-processing
+//Run long_study_ppt.m and select the study folder to create a powerpoint presentation of all
+//MIP images, one slide per subject, with labels for study timepoints and image windows added automatically
+//
+
+var time = dm.getDesc(1,"acquisitiontime");
+time = ~~time;						//bitwise remove decimal
+
+var pinv = dm.getDcmString(1, "ReferringPhysiciansName");	//read Principal Investigator's name
+pinv = pinv.split("^");
+pinv = pinv[0];												//just last name
+pinv = pinv.split(" ");
+if(pinv[1]){
+	pinv = pinv[0].concat(pinv[1]);							//delete any spaces, if any
+}
+
+if(!VQ.folderExists(parentFolder+"/"+studyid+"/"+subjid+"/")){
+	VQ.mkdir(parentFolder+"/"+studyid+"/",subjid);
+	if(!refdate){
+		if(VQ.askYesNoQuestion('Is this subject part of a longitudinal data set?')){
+			refdate = VQ.getText("Ref Date","Enter reference date (e.g. date of tumor implantation) in the format yyyymmdd:");
+		}else{
+			var injtime = VQ.getText("Inj Time","Enter radiotracer injection time in the format hhmmss (24hr):");
+		}
+	}
+}
+if(!VQ.folderExists(parentFolder+"/"+studyid+"/"+subjid+"/"+date)){
+	VQ.mkdir(parentFolder+"/"+studyid+"/"+subjid,date);
+}
+if(!VQ.folderExists(parentFolder+"/"+studyid+"/"+subjid+"/"+date+time)){
+	VQ.mkdir(parentFolder+"/"+studyid+"/"+subjid+"/"+date,time);
+}
+
+if(refdate){
+	VQ.writeFile(parentFolder+"/"+studyid+"/"+subjid+"/"+"refdate.txt",refdate);
+}
+if(injtime){
+	VQ.writeFile(parentFolder+"/"+studyid+"/"+subjid+"/"+"injtime.txt",injtime);
+}
+
+mw.saveImage(parentFolder+"/"+studyid+"/"+subjid+"/"+date+"/"+time+"/"+date+"_"+subjid+"_Range"+suvwinmin+"-"+suvwinmax+"-MIP.png", 0);		//MIP image
+mw.saveMovie(parentFolder+"/"+studyid+"/"+subjid+"/"+date+"/"+time+"/"+date+"_"+subjid+"_Range"+suvwinmin+"-"+suvwinmax+"-MIP.gif", 0);		//MIP gif
+
+mw.setupLayoutSlice();
+mw.switchCrosshair(1);
+
+mw.saveSession(date+'_'+subjid+'_'+pinv);
+
+//mw.executeScript('C:/Program Files/inviCRO/VivoQuant/VivoScript/Z_Crop-n-Save.vqs',0);
+
+//
+//FIN
+//
+
+throw new Error("FIN");
+VQ.abort();
+
