@@ -1,27 +1,26 @@
-% Programatically create longitudinal MIP and sag-cor-ax nm/ct, nm and ct slides
+% Programmatically create longitudinal MIP and sag-cor-ax nm/ct, nm and ct slides
 % Joseph R. Merrill
-% Cold Spring Harbor Lab
-% Updated 2021/06/29
-%% Open existing presentation
+% Cold Spring Harbor Laboratory
+% 2021/06/29
+% Update 2026/07/15
+%%
+
+cd(userpath);
+clear all;
+
+xppt = dir('stefslon-exportToPPTX*');
+addpath(genpath(xppt.name));                % add exportToPPTX tool to path
 
 isOpen  = exportToPPTX();
-if ~isempty(isOpen)
-    % If PowerPoint already started, then close first and then open a new one
+if ~isempty(isOpen)             % if a presentation was already started, close it
     exportToPPTX('close');
 end
 
-cd('C:\Users\JOSEPH\Documents\MATLAB');
-clear all;
-exportToPPTX('open','sag-cor-ax_template-new.pptx');
+exportToPPTX('open','long_study_template.pptx');    % open new presentation
 
-% User selects directory w/ images (produced by VQ script crop-n-save)
-studyDir = uigetdir('C:\Users\JOSEPH\Desktop\');
-[~,studyid] = fileparts(studyDir);		% read date from directory
+studyDir = uigetdir;                 % user selects directory w/ images (produced by VQ script)
+[~,studyid] = fileparts(studyDir);
 cd(studyDir);
-
-% dateDir = uigetdir('C:\Users\JOSEPH\Desktop\');
-% [~,date] = fileparts(dateDir);		% read date from directory
-% cd(dateDir);
 
 if isfile(['study_refdate.txt'])
     refdate = fileread(['study_refdate.txt']);
@@ -32,9 +31,9 @@ D = dir;
 D = D(isfolder({D.name}));
 D = D(~ismember({D.name},{'.','..'}));
 nsubj = numel(D);			% number of subfolders in the study folder, ie the number of subjects
-nslides = 0;                % in
+nslides = 0;                % initialize
 
-for j = 1:nsubj
+for j = 1:nsubj         % count through subject folders
 
 	subjD = D(j).name;
 	[~,subjid] = fileparts(subjD);	% read subjid from subfolders
@@ -50,7 +49,7 @@ for j = 1:nsubj
 	E = E(~ismember({E.name},{'.','..'}));
 	ndates = numel(E);			% number of subfolders in the study folder, ie the number of imaging dates
 	
-    if ndates > 4
+    if ndates > 4               % choose a ppt template based on number of longitudinal scans
         miptemplate = num2str(ndates);
         miptemplate = strcat(miptemplate,'mips');
     else
@@ -58,13 +57,16 @@ for j = 1:nsubj
     end
     
     exportToPPTX('addslide','Layout',miptemplate);		% open a slide for the static mips
+   	exportToPPTX('addtext',subjid,'Position','subjid');
+    exportToPPTX('addslide','Layout',miptemplate);      % open a slide for the dynamic mips
 	exportToPPTX('addtext',subjid,'Position','subjid');
-	nslides = nslides+1;
-	mipslidepos = nslides;							% the slide number for this subject's MIPs
+	nslides = nslides+2;
+	mipslidepos = nslides-1;							% the slide number for this subject's static MIPs
+    dynmipslidepos = nslides;                           % the slide number for this subject's dynamic MIPs
 	
-	itimepoint = 1;					% index of the current longitudinal timepoint, for arranging MIPs
+	itimepoint = 1;					   % index of the current longitudinal timepoint, for arranging MIPs
 	
-	for k = 1:ndates
+	for k = 1:ndates        % count through date folders
 	
 		dateD = E(k).name;
 		[~,date] = fileparts(dateD);	% read date from subfolders
@@ -87,10 +89,10 @@ for j = 1:nsubj
 		F = F(~ismember({F.name},{'.','..'}));
 		ntimes = numel(F);			% number of subfolders in the study folder, ie the number of imaging timepoints on that day
 		
-		for l = 1:ntimes
+		for l = 1:ntimes        % count through time folders
 		
 			timeD = F(l).name;
-			[~,time] = fileparts(timeD);	% read date from subfolders
+			[~,time] = fileparts(timeD);	% read time from subfolders
 			cd(timeD);
 		
 			exportToPPTX('switchslide',mipslidepos);
@@ -106,6 +108,19 @@ for j = 1:nsubj
                 exportToPPTX('addtext',['SUV ' range],'Position','mipscale');
             end
 		
+            exportToPPTX('switchslide',dynmipslidepos);
+
+            H = dir('*.gif')';
+            dynmip = H(1).name;
+            range = strsplit(G(1).name,{'Range','-MIP'});
+            range = range{2};
+			%%exportToPPTX('addtext',time,'Position',['time' num2str(itimepoint)]);
+            exportToPPTX('addpicture',dynmip,'Position',['mip' num2str(itimepoint)]);
+            exportToPPTX('addtext',timepoint,'Position',['date' num2str(itimepoint)]);
+            if l == 1                                 %only put scale on slide first time
+                exportToPPTX('addtext',['SUV ' range],'Position','mipscale');
+            end
+
 			nslice = numel(dir('*slices*'))/3;		%number of sets of sag-cor-ax images
 
 			if nslice
@@ -140,7 +155,6 @@ for j = 1:nsubj
 		
     end
     
-    %%exportToPPTX('addtext',['SUV ' range],'Position','mipscale');
 	cd('..');
 	
 end
@@ -149,4 +163,4 @@ newFile = exportToPPTX('save',[studyid '.pptx']);
 exportToPPTX('close');
 fprintf('dunzo');
 
-cd('C:\Users\JOSEPH\Documents\MATLAB');
+cd(userpath);
