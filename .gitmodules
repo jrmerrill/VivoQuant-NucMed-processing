@@ -1,0 +1,3 @@
+[submodule "exportToPPTX"]
+	path = exportToPPTX
+	url = https://github.com/stefslon/exportToPPTX
